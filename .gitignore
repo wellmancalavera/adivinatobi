@@ -1,0 +1,10 @@
+# entornos/IDE
+.venv/
+venv/
+.idea/
+__pycache__/
+*.pyc
+.DS_Store
+
+# datos locales de pruebas
+adivinatobi_data.json
