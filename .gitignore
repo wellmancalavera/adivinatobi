@@ -5,6 +5,7 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+.streamlit/
 
 # datos locales de pruebas
 adivinatobi_data.json
