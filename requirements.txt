@@ -1,1 +1,5 @@
 streamlit>=1.33,<2.0
+gspread>=5.12
+google-auth>=2.22
+supabase>=2.4.0
+postgrest>=0.13.8

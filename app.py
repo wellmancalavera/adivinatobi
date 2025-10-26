@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+from supabase import create_client, Client  # ← Supabase
 
 # =========================
 # CONFIG & ESTILO
@@ -96,45 +97,86 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-DATA_FILE = Path("adivinatobi_data.json")
+DATA_FILE = Path("adivinatobi_data.json")  # respaldo local para dev
 
 
 # =========================
-# PERSISTENCIA EN JSON
+# SUPABASE (persistencia)
+# =========================
+def _sb() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_ANON_KEY"]
+    return create_client(url, key)
+
+# =========================
+# PERSISTENCIA (con migraciones)
 # =========================
 def _empty_data():
-    return {"tramas": [], "predicciones": []}
+    # ahora incluye la lista de usuarios sugeridos
+    return {"tramas": [], "predicciones": [], "usuarios": ["Wellman", "Nico", "Juany"]}
 
 
 def load_data():
-    if not DATA_FILE.exists():
-        save_data(_empty_data())
+    """
+    Carga el estado desde Supabase (tabla store, fila id=1).
+    Si falla por cualquier motivo, cae a archivo local como respaldo.
+    """
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = _empty_data()
-        save_data(data)
+        sb = _sb()
+        res = sb.table("store").select("data").eq("id", 1).single().execute()
+        data = res.data["data"] if res.data and "data" in res.data else _empty_data()
 
-    # Migración: campo ganador único -> lista de ganadoras
-    changed = False
-    for t in data["tramas"]:
-        if "ganadoras_prediccion_ids" not in t:
-            old = t.get("ganadora_prediccion_id")
-            t["ganadoras_prediccion_ids"] = [old] if old else []
-            if "ganadora_prediccion_id" in t:
-                del t["ganadora_prediccion_id"]
+        # Migración: ganador único -> lista; y agregar 'usuarios'
+        changed = False
+        for t in data.get("tramas", []):
+            if "ganadoras_prediccion_ids" not in t:
+                old = t.get("ganadora_prediccion_id")
+                t["ganadoras_prediccion_ids"] = [old] if old else []
+                if "ganadora_prediccion_id" in t:
+                    del t["ganadora_prediccion_id"]
+                changed = True
+        if "usuarios" not in data or not isinstance(data["usuarios"], list):
+            data["usuarios"] = ["Wellman", "Nico", "Juany"]
             changed = True
-    if changed:
-        save_data(data)
-    return data
+
+        if changed:
+            save_data(data)
+        return data
+    except Exception:
+        # Fallback local (útil si corrés sin secrets)
+        if not DATA_FILE.exists():
+            save_data(_empty_data())
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            data = _empty_data()
+            save_data(data)
+            return data
 
 
 def save_data(data: dict):
-    tmp_path = DATA_FILE.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, DATA_FILE)
+    """
+    Guarda el estado en Supabase (tabla store, fila id=1).
+    También guarda localmente como respaldo (dev).
+    """
+    payload = json.dumps(data, ensure_ascii=False)
+
+    # Intento en Supabase
+    try:
+        sb = _sb()
+        sb.table("store").upsert({"id": 1, "data": data}).execute()
+    except Exception:
+        pass
+
+    # Respaldo local
+    try:
+        tmp_path = DATA_FILE.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp_path, DATA_FILE)
+    except Exception:
+        pass
 
 
 # =========================
@@ -184,7 +226,7 @@ def compute_leaderboard(data):
 
 
 # =========================
-# ESTADO DE SESIÓN
+# ESTADO DE SESIÓN + URL (persistir usuario y vista)
 # =========================
 if "pantalla" not in st.session_state:
     st.session_state.pantalla = "inicio"  # "inicio" | "crear" | "trama"
@@ -197,10 +239,14 @@ if "trama_seleccionada" not in st.session_state:
 if "editando_pred" not in st.session_state:
     st.session_state.editando_pred = {}  # {pred_id: True/False}
 
-# =========================
-# ABRIR TRAMA DESDE ?view=ID (API nueva: st.query_params)
-# =========================
-qp = st.query_params  # objeto tipo dict (puede devolver str o lista de str según versión)
+# Leer usuario desde query param ?u=...
+qp = st.query_params
+if not st.session_state.usuario and "u" in qp:
+    _u = qp["u"][0] if isinstance(qp["u"], list) else qp["u"]
+    if _u:
+        st.session_state.usuario = _u
+
+# Abrir trama desde ?view=ID
 _id = None
 if "view" in qp:
     val = qp["view"]
@@ -209,15 +255,14 @@ if "view" in qp:
 if _id:
     st.session_state.pantalla = "trama"
     st.session_state.trama_seleccionada = _id
-    # Limpiamos los query params para que no quede pegado ni provoque loops
+    # Limpiar solo 'view' y preservar 'u' para que no se "desloguee"
     try:
-        st.query_params.clear()        # Streamlit >= 1.32
+        current_u = st.query_params.get("u")
+        st.query_params.clear()
+        if current_u:
+            st.query_params.update({"u": current_u})
     except Exception:
-        try:
-            # Fallback: sobrescribir a vacío
-            st.query_params.update({})
-        except Exception:
-            pass
+        pass
     st.rerun()
 
 
@@ -327,13 +372,69 @@ def cerrar_trama_desierta(trama_id, usuario):
     save_data(data)
     st.warning("🚫 Trama cerrada como desierta (sin puntos).")
 
+def eliminar_trama(trama_id, usuario):
+    """Elimina la trama y todas sus predicciones (solo creador)."""
+    data = load_data()
+    trama = get_trama(data, trama_id)
+    if not trama or trama["creador"] != usuario:
+        st.error("No podés eliminar esta trama.")
+        return
+    # Borrar predicciones asociadas
+    data["predicciones"] = [p for p in data["predicciones"] if p["trama_id"] != trama_id]
+    # Borrar trama
+    data["tramas"] = [t for t in data["tramas"] if t["id"] != trama_id]
+    save_data(data)
+    st.success("🧨 Trama eliminada.")
+    goto_inicio()
+
+
+def agregar_usuario(nombre: str):
+    nombre = nombre.strip()
+    if not nombre:
+        st.warning("El nombre no puede estar vacío.")
+        return
+    data = load_data()
+    if "usuarios" not in data or not isinstance(data["usuarios"], list):
+        data["usuarios"] = []
+    if nombre not in data["usuarios"]:
+        data["usuarios"].append(nombre)
+        save_data(data)
+        st.toast(f"👤 Usuario “{nombre}” agregado")
+    st.session_state.usuario = nombre
+    # Persistimos en URL
+    try:
+        st.query_params.update({"u": nombre})
+    except Exception:
+        pass
+
+
+def eliminar_usuario_de_lista(nombre: str):
+    data = load_data()
+    if "usuarios" not in data or not isinstance(data["usuarios"], list):
+        data["usuarios"] = []
+    if nombre in data["usuarios"]:
+        data["usuarios"].remove(nombre)
+        save_data(data)
+        st.toast(f"🗑️ Usuario “{nombre}” eliminado de la lista")
+    if st.session_state.usuario == nombre:
+        st.session_state.usuario = ""
+        try:
+            # limpiamos 'u' en la URL
+            st.query_params.clear()
+        except Exception:
+            pass
+
 
 # =========================
-# SIDEBAR (LOGO CLIC + USUARIO BLOQUEABLE)
+# SIDEBAR (selector y gestión de usuarios)
 # =========================
-def _lock_user():
-    if st.session_state.usuario.strip():
-        st.session_state.usuario_locked = True
+def _actualizar_usuario_desde_selector():
+    sel = st.session_state._usuario_sel
+    st.session_state.usuario = sel
+    try:
+        st.query_params.update({"u": sel})
+    except Exception:
+        pass
 
 with st.sidebar:
     st.markdown("<div class='adivinatobi-title'>Adivinatobi 🔮</div>", unsafe_allow_html=True)
@@ -342,27 +443,44 @@ with st.sidebar:
         st.button("Volver al inicio", on_click=goto_inicio)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.text_input(
-        "Tu nombre (obligatorio)",
-        key="usuario",
-        placeholder="Por ej., Guido Morrison",
-        on_change=_lock_user,
-        disabled=st.session_state.usuario_locked,
+    data_for_sidebar = load_data()
+    usuarios_lista = data_for_sidebar.get("usuarios", ["Wellman", "Nico", "Juany"])
+    # Selector de usuario
+    st.markdown("### Elegí usuario")
+    default_idx = 0 if usuarios_lista else None
+    # Si ya hay usuario en sesión, usalo como valor inicial
+    inicial = st.session_state.usuario if st.session_state.usuario in usuarios_lista else (usuarios_lista[default_idx] if usuarios_lista else "")
+    st.selectbox(
+        "Usuarios",
+        options=usuarios_lista,
+        index=usuarios_lista.index(inicial) if inicial in usuarios_lista else 0,
+        key="_usuario_sel",
+        on_change=_actualizar_usuario_desde_selector,
+        label_visibility="collapsed",
     )
-    if st.session_state.usuario_locked:
-        st.caption("🔒 Nombre bloqueado hasta recargar la página (F5).")
+
+    # Agregar nuevo usuario
+    with st.form("form_nuevo_usuario", clear_on_submit=True):
+        nuevo = st.text_input("Agregar usuario", placeholder="Escribí un nombre…")
+        c1, c2 = st.columns([1,1])
+        agregar = c1.form_submit_button("Agregar", use_container_width=True)
+        borrar = c2.form_submit_button("Eliminar usuario", use_container_width=True)
+        if agregar:
+            agregar_usuario(nuevo)
+            st.rerun()
+        if borrar:
+            # Eliminar el actualmente seleccionado del selectbox
+            eliminar_usuario_de_lista(st.session_state._usuario_sel)
+            st.rerun()
+
+    st.caption("El usuario elegido se mantiene al navegar (se guarda en la URL).")
 
     st.divider()
-    st.caption("Elegí una tramatobi o creá una y escribí tu predicción. "
-               "Al final, los que acierten ganarán puntos. "
-               "Cada usuario puede crear hasta tres predicciones por trama. "
-               "El que acierta se lleva 3 puntos si hizo una sola predicción, "
-               "2 puntos si hizo dos y 1 punto si hizo una. "
-               "Si nadie acierta, la trama queda declarada desierta. ")
+    st.caption("Reglas: hasta tres predicciones por trama. 3/2/1 puntos según cuántas hizo el ganador.")
 
 
 # =========================
-# CABECERA GLOBAL (título centrado + bienvenida)
+# CABECERA GLOBAL
 # =========================
 def cabecera():
     st.markdown(
@@ -377,7 +495,7 @@ def cabecera():
 
 
 # =========================
-# BLOQUE: TABLA DE POSICIONES (columna derecha)
+# BLOQUE: TABLA DE POSICIONES
 # =========================
 def bloque_tabla_posiciones():
     st.subheader("🏆 Tabla de posiciones")
@@ -391,7 +509,7 @@ def bloque_tabla_posiciones():
 
 
 # =========================
-# UI AUX: CARTA CLICKEABLE (HTML + query param)
+# UI AUX: CARTA CLICKEABLE
 # =========================
 def trama_link_card(trama, total_preds):
     pill_html = f"<span class='pill {'pill-open' if trama['abierta'] else 'pill-closed'}'>" \
@@ -403,8 +521,9 @@ def trama_link_card(trama, total_preds):
         f"<div class='meta'>por {trama['creador']} • {trama['creada']} • {total_preds} predicciones</div>"
     )
     css_class = "trama-card open" if trama["abierta"] else "trama-card closed"
+    # Abrir en la MISMA pestaña (no usamos target=_blank)
     st.markdown(
-        f"""<a href="?view={trama['id']}" class="{css_class}" title="Abrir trama">
+        f"""<a href="?view={trama['id']}&u={st.session_state.usuario}" class="{css_class}" title="Abrir trama">
             {inner}
         </a>""",
         unsafe_allow_html=True,
@@ -450,7 +569,7 @@ def pantalla_crear():
     cabecera()
 
     if not st.session_state.usuario.strip():
-        st.error("Completá tu nombre a la izquierda. Los puntos se asocian al nombre, así que usá siempre el mismo. ")
+        st.error("Elegí tu usuario a la izquierda.")
         if st.button("Volver a las tramas"):
             goto_inicio()
         return
@@ -505,7 +624,7 @@ def pantalla_trama():
         # Agregar predicción
         if trama["abierta"]:
             if not st.session_state.usuario.strip():
-                st.warning("Ingresá tu usuario (arriba a la izquierda) para predecir.")
+                st.warning("Elegí un usuario (arriba a la izquierda) para predecir.")
             else:
                 if len(mis_preds) < 3:
                     with st.form("form_add_pred"):
@@ -562,10 +681,10 @@ def pantalla_trama():
                                 st.rerun()
 
     with col_right:
-        # Cierre de trama y tabla de posiciones
-        if trama["abierta"]:
-            if st.session_state.usuario.strip() == trama["creador"]:
-                st.subheader("🏁 Cerrar trama")
+        # Cierre / Eliminación de trama y tabla de posiciones
+        if st.session_state.usuario.strip() == trama["creador"]:
+            st.subheader("⚙️ Administración de trama")
+            if trama["abierta"]:
                 st.caption("Podés elegir una o varias predicciones ganadoras.")
                 opciones_dict = {f"{p['texto']} — ({p['autor']})": p["id"] for p in preds} if preds else {}
                 seleccion = st.multiselect(
@@ -580,23 +699,32 @@ def pantalla_trama():
                 if c2.button("Declarar desierta"):
                     cerrar_trama_desierta(trama["id"], st.session_state.usuario.strip())
                     st.rerun()
-            else:
-                st.subheader("ℹ️ Trama abierta")
-                st.caption("Solo el creador puede cerrarla.")
+
+            st.markdown("---")
+            # Eliminar trama (confirmación)
+            st.markdown("### 🧨 Eliminar trama")
+            conf = st.checkbox("Estoy seguro, quiero eliminar esta trama y sus predicciones.")
+            if st.button("Eliminar trama", type="secondary", disabled=not conf):
+                eliminar_trama(trama["id"], st.session_state.usuario.strip())
+                st.rerun()
         else:
-            st.subheader("✅ Trama cerrada")
-            if trama.get("ganadoras_prediccion_ids"):
-                ganadoras = []
-                for pid in trama["ganadoras_prediccion_ids"]:
-                    pred = next((p for p in data["predicciones"] if p["id"] == pid), None)
-                    if pred:
-                        cant = len(list_predicciones_de_trama_por_usuario(data, trama["id"], pred["autor"]))
-                        pts = compute_puntos_por_cantidad(cant)
-                        ganadoras.append(f"**{pred['autor']}** con “{pred['texto']}” → **+{pts} pts**")
-                if ganadoras:
-                    st.success("Ganadores:\n\n- " + "\n- ".join(ganadoras))
+            if trama["abierta"]:
+                st.subheader("ℹ️ Trama abierta")
+                st.caption("Solo el creador puede cerrarla o eliminarla.")
             else:
-                st.warning("Cerrada como desierta (no se asignaron puntos).")
+                st.subheader("✅ Trama cerrada")
+                if trama.get("ganadoras_prediccion_ids"):
+                    ganadoras = []
+                    for pid in trama["ganadoras_prediccion_ids"]:
+                        pred = next((p for p in data["predicciones"] if p["id"] == pid), None)
+                        if pred:
+                            cant = len(list_predicciones_de_trama_por_usuario(data, trama["id"], pred["autor"]))
+                            pts = compute_puntos_por_cantidad(cant)
+                            ganadoras.append(f"**{pred['autor']}** con “{pred['texto']}” → **+{pts} pts**")
+                    if ganadoras:
+                        st.success("Ganadores:\n\n- " + "\n- ".join(ganadoras))
+                else:
+                    st.warning("Cerrada como desierta (no se asignaron puntos).")
 
         st.divider()
         bloque_tabla_posiciones()
