@@ -97,10 +97,27 @@ def save_data(data):
         self.store.data["tramas"][0]["ganadoras_prediccion_ids"] = []
         app = self.app()
         self.click(app, "🔓 Reabrir trama")
-        next(field for field in app.text_input if field.label == "Tu predicción").input("Llega Luis")
+        next(field for field in app.text_area if field.label == "Tu predicción").input("Llega Luis")
         self.click(app, "Agregar predicción")
         self.assertEqual(len(self.store.data["predicciones"]), 4)
         self.assertEqual(self.store.data["predicciones"][-1]["texto"], "Llega Luis")
+
+    def test_edit_title_and_description_preserves_results(self):
+        before = copy.deepcopy(self.store.data)
+        app = self.app()
+        next(field for field in app.text_input if field.label == "Título de la trama").input("Nueva pregunta")
+        next(field for field in app.text_area if field.label == "Descripción de la trama").input("Nuevo contexto\nSegunda línea")
+        self.click(app, "Guardar cambios")
+        expected = before
+        expected["tramas"][0].update(pregunta="Nueva pregunta", descripcion="Nuevo contexto\nSegunda línea")
+        self.assertEqual(self.store.data, expected)
+        self.assertIn("Nueva pregunta", [header.value for header in app.header])
+        next(field for field in app.text_input if field.label == "Título de la trama").input("   ")
+        self.click(app, "Guardar cambios")
+        self.assertEqual(self.store.data, expected)
+        self.assertTrue(any("obligatoria" in warning.value for warning in app.warning))
+        app = self.app("Nico")
+        self.assertNotIn("Título de la trama", [field.label for field in app.text_input])
 
 
 if __name__ == "__main__":

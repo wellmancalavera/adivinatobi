@@ -318,6 +318,21 @@ def crear_trama(usuario, pregunta, descripcion):
     goto_inicio()
 
 
+def editar_trama(trama_id, usuario, pregunta, descripcion):
+    data = load_data()
+    trama = get_trama(data, trama_id)
+    if not trama or trama["creador"] != usuario:
+        st.error("No podés editar esta trama.")
+        return False
+    if not pregunta.strip():
+        st.warning("La pregunta es obligatoria.")
+        return False
+    trama["pregunta"] = pregunta.strip()
+    trama["descripcion"] = descripcion.strip()
+    save_data(data)
+    return True
+
+
 def agregar_prediccion(usuario, trama_id, texto):
     data = load_data()
     trama = get_trama(data, trama_id)
@@ -640,7 +655,18 @@ def pantalla_trama():
         st.button("Volver al inicio", on_click=goto_inicio)
         return
 
-    st.header(trama["pregunta"])
+    titulo_col, editar_col = st.columns([5, 1])
+    with titulo_col:
+        st.header(trama["pregunta"])
+    with editar_col:
+        if st.session_state.usuario.strip() == trama["creador"]:
+            with st.popover("✏️ Editar trama"):
+                with st.form(f"editar_trama_{trama['id']}"):
+                    pregunta = st.text_input("Título de la trama", value=trama["pregunta"])
+                    descripcion = st.text_area("Descripción de la trama", value=trama["descripcion"])
+                    if st.form_submit_button("Guardar cambios", type="primary"):
+                        if editar_trama(trama["id"], st.session_state.usuario.strip(), pregunta, descripcion):
+                            st.rerun()
     estado_pill = "<span class='pill pill-open'>Abierta</span>" if trama["abierta"] else "<span class='pill pill-closed'>Cerrada</span>"
     st.markdown(
         f"{estado_pill} &nbsp; <span class='brand-sub'>por {trama['creador']} • {trama['creada']}</span>",
@@ -668,7 +694,7 @@ def pantalla_trama():
             else:
                 if len(mis_preds) < 3:
                     with st.form("form_add_pred"):
-                        texto = st.text_input("Tu predicción", placeholder="Escribí una predicción clara y breve…")
+                        texto = st.text_area("Tu predicción", height=120, placeholder="Escribí una predicción clara y breve…")
                         enviar = st.form_submit_button("Agregar predicción", type="primary")
                         if enviar:
                             if not texto.strip():
@@ -707,7 +733,7 @@ def pantalla_trama():
                                 eliminar_prediccion(p["id"], st.session_state.usuario.strip())
                                 st.rerun()
                         else:
-                            new_text = st.text_input("Editar tu predicción", value=p["texto"], key=f"editfield_{p['id']}")
+                            new_text = st.text_area("Editar tu predicción", value=p["texto"], height=120, key=f"editfield_{p['id']}")
                             c1, c2 = st.columns(2)
                             if c1.button("Guardar", key=f"save_{p['id']}"):
                                 if not new_text.strip():
