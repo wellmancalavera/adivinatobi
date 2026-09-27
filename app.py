@@ -2,6 +2,7 @@ import json
 import os
 import uuid
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 import streamlit as st
@@ -539,14 +540,23 @@ def bloque_tabla_posiciones():
 # =========================
 # UI AUX: CARTA CLICKEABLE
 # =========================
-def trama_link_card(trama, total_preds):
+def trama_link_card(trama, preds):
+    resultado = ""
+    if not trama["abierta"]:
+        ganadoras_ids = set(trama.get("ganadoras_prediccion_ids", []))
+        autores = list(dict.fromkeys(p["autor"] for p in preds if p["id"] in ganadoras_ids))
+        if autores:
+            etiqueta = "Ganador" if len(autores) == 1 else "Ganadores"
+            resultado = f" • {etiqueta}: {escape(', '.join(autores))}"
+        else:
+            resultado = " • Sin ganador"
     pill_html = f"<span class='pill {'pill-open' if trama['abierta'] else 'pill-closed'}'>" \
                 f"{'Abierta' if trama['abierta'] else 'Cerrada'}</span>"
     inner = (
         f"{pill_html}"
         f"<div style='height:6px'></div>"
         f"<div style='font-weight:700; font-size:1.05rem; color:#222'>{trama['pregunta']}</div>"
-        f"<div class='meta'>por {trama['creador']} • {trama['creada']} • {total_preds} predicciones</div>"
+        f"<div class='meta'>por {trama['creador']} • {trama['creada']} • {len(preds)} predicciones{resultado}</div>"
     )
     css_class = "trama-card open" if trama["abierta"] else "trama-card closed"
     # Abrir en la MISMA pestaña (no usamos target=_blank)
@@ -578,7 +588,7 @@ def pantalla_inicio():
         else:
             for t in abiertas:
                 preds = list_predicciones_de_trama(data, t["id"])
-                trama_link_card(t, len(preds))
+                trama_link_card(t, preds)
 
         st.markdown("---")
         st.markdown("### 🔒 Tramas cerradas")
@@ -587,7 +597,7 @@ def pantalla_inicio():
         else:
             for t in cerradas:
                 preds = list_predicciones_de_trama(data, t["id"])
-                trama_link_card(t, len(preds))
+                trama_link_card(t, preds)
 
     with col_right:
         bloque_tabla_posiciones()
