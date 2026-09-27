@@ -209,6 +209,22 @@ def compute_puntos_por_cantidad(cant_predicciones_del_ganador):
     return 1
 
 
+def etiquetas_predicciones(preds):
+    cantidades = {}
+    for pred in preds:
+        cantidades[pred["autor"]] = cantidades.get(pred["autor"], 0) + 1
+    numeros = {}
+    etiquetas = {}
+    for pred in preds:
+        autor = pred["autor"]
+        numeros[autor] = numeros.get(autor, 0) + 1
+        etiquetas[pred["id"]] = (
+            f"{autor} · Predicción {numeros[autor]}"
+            if cantidades[autor] > 1 else autor
+        )
+    return etiquetas
+
+
 def compute_leaderboard(data):
     scores = {}
     for trama in data["tramas"]:
@@ -371,6 +387,18 @@ def cerrar_trama_desierta(trama_id, usuario):
     trama["ganadoras_prediccion_ids"] = []
     save_data(data)
     st.warning("🚫 Trama cerrada como desierta (sin puntos).")
+
+def reabrir_trama(trama_id, usuario):
+    data = load_data()
+    trama = get_trama(data, trama_id)
+    if not trama or trama["creador"] != usuario or trama["abierta"]:
+        st.error("No podés reabrir esta trama.")
+        return
+    trama["abierta"] = True
+    trama["ganadoras_prediccion_ids"] = []
+    save_data(data)
+    st.success("🔓 Trama reabierta. Podés recibir predicciones y elegir ganadores nuevamente.")
+
 
 def eliminar_trama(trama_id, usuario):
     """Elimina la trama y todas sus predicciones (solo creador)."""
@@ -602,6 +630,7 @@ def pantalla_trama():
         st.button("Volver al inicio", on_click=goto_inicio)
         return
 
+    st.header(trama["pregunta"])
     estado_pill = "<span class='pill pill-open'>Abierta</span>" if trama["abierta"] else "<span class='pill pill-closed'>Cerrada</span>"
     st.markdown(
         f"{estado_pill} &nbsp; <span class='brand-sub'>por {trama['creador']} • {trama['creada']}</span>",
@@ -617,6 +646,7 @@ def pantalla_trama():
     with col_left:
         st.subheader("🗳️ Predicciones")
         preds = list_predicciones_de_trama(data, trama["id"])
+        etiquetas = etiquetas_predicciones(preds)
         mis_preds = list_predicciones_de_trama_por_usuario(
             data, trama["id"], st.session_state.usuario.strip()
         ) if st.session_state.usuario.strip() else []
@@ -648,7 +678,7 @@ def pantalla_trama():
                 with st.container():
                     st.markdown(
                         f"<div class='pred-card {'me' if is_me else ''}'>"
-                        f"<strong>{p['autor']}</strong> — <span style='color:#777'>{p['creada']}</span><br>"
+                        f"<strong>{etiquetas[p['id']]}</strong> — <span style='color:#777'>{p['creada']}</span><br>"
                         f"{p['texto']}"
                         + (f"<br><span style='color:#999; font-size:0.85rem'>Editado: {p['ultima_edicion']}</span>" if p['ultima_edicion'] else "")
                         + "</div>",
@@ -686,18 +716,23 @@ def pantalla_trama():
             st.subheader("⚙️ Administración de trama")
             if trama["abierta"]:
                 st.caption("Podés elegir una o varias predicciones ganadoras.")
-                opciones_dict = {f"{p['texto']} — ({p['autor']})": p["id"] for p in preds} if preds else {}
                 seleccion = st.multiselect(
                     "Predicciones ganadoras",
-                    options=list(opciones_dict.keys()) if opciones_dict else [],
+                    options=[p["id"] for p in preds],
+                    format_func=etiquetas.__getitem__,
+                    key=f"ganadoras_{trama['id']}",
                 )
                 c1, c2 = st.columns(2)
                 if c1.button("Cerrar con ganador(es)", type="primary", disabled=not seleccion):
-                    ids = [opciones_dict[etiqueta] for etiqueta in seleccion]
-                    cerrar_trama_con_ganadores(trama["id"], ids, st.session_state.usuario.strip())
+                    cerrar_trama_con_ganadores(trama["id"], seleccion, st.session_state.usuario.strip())
                     st.rerun()
                 if c2.button("Declarar desierta"):
                     cerrar_trama_desierta(trama["id"], st.session_state.usuario.strip())
+                    st.rerun()
+            else:
+                st.caption("Al reabrir se conservan las predicciones y se quitan los ganadores y puntos del cierre anterior.")
+                if st.button("🔓 Reabrir trama", type="primary"):
+                    reabrir_trama(trama["id"], st.session_state.usuario.strip())
                     st.rerun()
 
             st.markdown("---")
