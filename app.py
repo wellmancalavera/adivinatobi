@@ -475,13 +475,13 @@ with st.sidebar:
     usuarios_lista = data_for_sidebar.get("usuarios", ["Wellman", "Nico", "Juany"])
     # Selector de usuario
     st.markdown("### Elegí usuario")
-    default_idx = 0 if usuarios_lista else None
     # Si ya hay usuario en sesión, usalo como valor inicial
-    inicial = st.session_state.usuario if st.session_state.usuario in usuarios_lista else (usuarios_lista[default_idx] if usuarios_lista else "")
+    inicial = st.session_state.usuario
     st.selectbox(
         "Usuarios",
         options=usuarios_lista,
-        index=usuarios_lista.index(inicial) if inicial in usuarios_lista else 0,
+        index=usuarios_lista.index(inicial) if inicial in usuarios_lista else None,
+        placeholder="Elegí un usuario",
         key="_usuario_sel",
         on_change=_actualizar_usuario_desde_selector,
         label_visibility="collapsed",
